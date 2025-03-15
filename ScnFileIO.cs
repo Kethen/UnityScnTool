@@ -29,6 +29,8 @@ namespace AevenScnTool.IO
 			{
 				BuildTreeItem(item, container, sceneObj, identityMatrix);
 			}
+
+			CreateBoneAggregator();
 		}
 
 
@@ -107,6 +109,80 @@ namespace AevenScnTool.IO
 			};
 		}
 
+		// make it so that exported files (gltf mostly) have all the bones
+		static void CreateBoneAggregator()
+		{
+			GameObject go = new GameObject("_bone_aggregator");
+			SkinnedMeshRenderer smr = go.AddComponent<SkinnedMeshRenderer>();
+
+			List<Transform> bones = new List<Transform>();
+			List<BoneWeight1> boneWeights = new List<BoneWeight1>();
+			List<Matrix4x4> bindPoses = new List<Matrix4x4>();
+
+			GameObject boneSystem = null;
+			GameObject firstBone = null;
+			foreach (SceneChunk chunk in ScnFileImporter.createdObjects.Keys)
+			{
+				GameObject curGo = ScnFileImporter.createdObjects[chunk];
+				Bone bone = curGo.GetComponent<Bone>();
+				Bonesystem bs = curGo.GetComponent<Bonesystem>();
+				if (bs != null)
+				{
+					boneSystem = curGo;
+					continue;
+				}
+				else if (bone == null)
+				{
+					continue;
+				}
+				Debug.Log(String.Format("adding bone {0} to aggregator", curGo.name));
+				bones.Add(curGo.transform);
+				bindPoses.Add(curGo.transform.localToWorldMatrix);
+				if (firstBone == null)
+				{
+					firstBone = curGo;
+				}
+			}
+
+			for (int i = 0;i < 4; i++)
+			{
+				BoneWeight1 bw = new BoneWeight1();
+				for(int j = 0;j < bones.Count;j++)
+				{
+					bw.boneIndex = j;
+					if(j == 0)
+					{
+						bw.weight = 1.0f;
+					}
+					else
+					{
+						bw.weight = 0.0f;
+					}
+					boneWeights.Add(bw);
+				}
+			}
+
+			if (boneSystem == null || bones.Count == 0)
+			{
+				return;
+			}
+
+			fp = firstBone.transform.position;
+
+			smr.bones = bones.ToArray();
+			Mesh mesh = new Mesh();
+			mesh.vertices = new Vector3[]{new Vector3(fp, fp, fp), new Vector3(fp, fp, fp), new Vector3(fp, fp, fp), new Vector3(fp, fp, fp)};
+			mesh.triangles = new int[] {0, 1, 2, 0, 3, 1, 0, 3, 2, 3, 1, 2};
+			Byte boneCount = (Byte)bones.Count;
+			mesh.SetBoneWeights(new NativeArray<Byte>(new Byte[]{boneCount, boneCount, boneCount, boneCount}, Allocator.Temp), new NativeArray<BoneWeight1>(boneWeights.ToArray(), Allocator.Temp));
+			mesh.bindposes = bindPoses.ToArray();
+			smr.sharedMesh = mesh;
+			smr.rootBone = boneSystem.transform;
+			
+			Material[] materials = new Material[]{AssetDatabase.LoadAssetAtPath<Material>(ScnToolData.RootPath + "Editor/Materials/S4_Lit.mat")};
+			smr.sharedMaterials = materials;
+			go.transform.SetParent(boneSystem.transform);
+		}
 
 		static GameObject CreateModel(ModelChunk model, DirectoryInfo di, GameObject parent, bool identityMatrix)
 		{
@@ -943,6 +1019,10 @@ namespace AevenScnTool.IO
 		public static void CreateChunksFromChildren(Transform parent, Transform relativeParent, SceneContainer container, SceneChunk parentChunk)
 		{
 			try{
+				List<Transform> boned_models = new List<Transform>();
+				List<Transform> others = new List<Transform>();
+
+				// move boned models to the very end, game needs bones to be processed before weighted bones
 				for (int i = 0; i < parent.childCount; i++)
 				{
 					Transform child = parent.GetChild(i);
@@ -950,7 +1030,28 @@ namespace AevenScnTool.IO
 					{
 						continue;
 					}
-	
+					if(child.gameObject.name == "_bone_aggregator")
+					{
+						// throw away the bone aggregator
+						continue;
+					}
+
+					SkinnedMeshRenderer smr = child.GetComponent<SkinnedMeshRenderer>();
+					if (smr)
+					{
+						boned_models.Add(child);
+					}
+					else
+					{
+						others.Add(child);
+					}
+				}
+
+				// append boned_models into others, start processing the list of children
+				others.AddRange(boned_models);
+				int c = 0;
+				foreach (Transform child in others)
+				{
 					SceneChunk childChunk = CreateChunk(child, container, parentChunk, relativeParent);
 	
 					Transform relative;
@@ -966,7 +1067,8 @@ namespace AevenScnTool.IO
 					}
 	
 					CreateChunksFromChildren(child, relative, container, childChunk);
-					EditorUtility.DisplayProgressBar($"Parsing unity scene! OwO", $"{child.name}", (float)i/(float)parent.childCount);
+					EditorUtility.DisplayProgressBar($"Parsing unity scene! OwO", $"{child.name}", (float)c/(float)others.Count);
+					c++;
 				}
             	EditorUtility.ClearProgressBar();
 			}
